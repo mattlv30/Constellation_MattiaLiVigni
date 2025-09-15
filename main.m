@@ -30,7 +30,7 @@ T = 13082; % Orbital period [s] ?
 tspan = linspace(0,T,1000); % Timespan [s] ?
 
 % Noise (assuming white noise)
-sigmaR = 10e1; % [km]
+sigmaR = 10e2; % [km]
 
 %% Structure Initialization
 
