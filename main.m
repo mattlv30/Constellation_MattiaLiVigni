@@ -1,0 +1,253 @@
+%% Constellation Research Project 
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+% Author: Mattia Li Vigni 
+% Supervisor: Prof. Simone Servadio
+% Creation date: 09/11/2025
+% Update date: 
+
+clear all; clc; close all; 
+
+folder = fullfile(pwd);
+addpath(genpath(folder))
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+%% Constants and initial data 
+
+mu = 3.986*10^14; % Earth's gravitational constant [m^3/s^2]
+earthradius = 6371; % Earth's radius [km]
+a1 = 8413*1000; % Semi major axis first orbit [m]
+a2 = a1 + 1000e3; % Semi major axis second orbit [m]
+ecc = 0.00013; % Eccentricity []
+incl = 54; % Inclination [°]
+argp = 98.9994; % Argument of perigee [°]
+RAAN = 45; % Right Ascension of the Ascending Node [°]
+lonper = 0; % ?
+truelon = 0; % True anomaly [°]
+T = 13082; % Orbital period [s] ?
+tspan = linspace(0,T,1000); % Timespan [s] ?
+
+% Noise (assuming white noise)
+sigmaR = 10e1; % [km]
+
+%% Structure Initialization
+
+state1 = [];
+satellitepos = [];
+state1pos={};
+sat_at_time=cell(length(tspan),1);
+matrices = struct();
+
+%% Initial condition
+
+% Define number of satellite
+n_sat = 32;
+
+% Define number and type of orbits
+
+% Semi major axes - number and "radius" of concentrical "spheres"
+n_a = 2;
+semi_major_axes = linspace(a1, a2, n_a);
+
+% Inclination - number and range of orbital planes
+n_i = 4; 
+i1 = 0; % [°]
+i2 = 180-45; % [°]
+inclination = linspace(i1,i2,n_i);
+
+% True anomaly - range of true anomaly
+f1 = 45; % [°]
+f2 = 360-45; % [°]
+n_f = round(n_sat/n_a/n_i);
+true_anomaly = linspace(f1,f2,n_f);
+
+% Update number of satellate and compute number of masters and slaves
+n_sat = n_a*n_i*n_f;
+n_master = round(n_sat*0.1);
+n_slave = n_sat - n_master;
+id_masters = randperm(n_sat,n_master);
+
+second = false;
+
+for a = semi_major_axes % Semi major axes
+    for incl = inclination % Inclination
+        
+        % To change the pattern of the orbits 
+        incl = incl + 45/2;
+
+        if RAAN >= 360
+            RAAN = RAAN - 360;
+        else
+            RAAN = RAAN + 45;
+        end
+
+        for f = true_anomaly % True anomaly
+
+            % Calculate Cartesian coordinates and velocities
+            [r_ijk, v_ijk] = keplerian2ijk(a, ecc, incl, RAAN, argp, f,'lonper',lonper);
+            
+            state1 = [state1; r_ijk' , v_ijk'];
+        end
+    end
+end
+
+%% Integration of the two body problem 
+
+for i=1:size(state1,1)
+    % Set initial condition, integration options and integrate 
+    initial_conditions = state1(i, :); 
+    ode_options = odeset('RelTol',1e-13,'AbsTol',1e-13);
+    [~,state1pos] = ode45(@(t, x) two_body(x, mu), tspan, initial_conditions, ode_options);
+    
+    % Save the data in two structures (satellites is not actually needed) 
+    satellitepos{i} = state1pos(:,1:3);
+    state1pos(:,1:3) = state1pos(:,1:3)/1e3;
+    satellitenumber = ['satellite' num2str(i)];
+    satellites.(satellitenumber) = struct(); 
+    for t = 1:length(tspan)
+        satellitenumberattime = ['time' num2str(t)];
+        satellites.(satellitenumber).(satellitenumberattime) = satellitepos{i}(t, :);
+        sat_at_time{t}(i,:) = satellitepos{i}(t, :);
+    
+    end
+    
+    % Plot the initial conditions
+    if ismember(i, id_masters) % Satellite i is master 
+        plot3(state1pos(1,1),state1pos(1,2),state1pos(1,3),'*b','MarkerSize',8,'LineWidth',3);
+    else % Satellite i is slave 
+        plot3(state1pos(1,1),state1pos(1,2),state1pos(1,3),'*k','MarkerSize',6,'LineWidth',3);
+    end
+    
+    hold on;
+    plot3(state1pos(:,1), state1pos(:,2), state1pos(:,3), 'r', 'LineWidth', 2);
+end
+
+
+% Plot the Earth and the legend 
+earth_sphere
+axis tight
+grid on;
+title('Initial Position of Satellites at t = 0');
+lgd_mast = plot(nan, nan, '*b','MarkerSize',8,'LineWidth',3, 'DisplayName', 'Master');
+lgd_slave = plot(nan, nan, '*k','MarkerSize',6,'LineWidth',3, 'DisplayName', 'Slave');
+
+legend([lgd_mast lgd_slave], {'Master', 'Slave'});
+
+%% Evaluate visibility and create matrices
+
+% Initialise structure 
+matrices.range = struct();
+matrices.azimuth = struct();
+matrices.elevation = struct();
+
+% Consider satellite state for each timestep
+for t = 1:length(tspan) 
+
+    % Initialise the 3 matrices 
+    range_matrix = zeros(n_sat);
+    azimuth_matrix = zeros(n_sat);
+    elevation_matrix = zeros(n_sat);
+
+    sats_state = sat_at_time{t}; % state of all satellites at time = t 
+    for i = 1:size(sats_state,1)
+        for j = 1:size(sats_state,1)
+            sat1 = sats_state(i,:) / 1000;
+            sat2 = sats_state(j,:) / 1000;
+
+            [in_LOS,rel_dist] = eval_LOS(sat1,sat2, earthradius, sigmaR);
+
+            if in_LOS % If the two sats are in los
+
+                if i == j % satellite relative position wrt itself 
+                    range_matrix(i,j) = 0;
+                    azimuth_matrix(i, j) = 0;
+                    elevation_matrix(i, j) = 0;
+                else
+
+                    % Update the range value in the range matrix
+                    range_matrix(i,j) = norm(rel_dist);
+
+                    % Calculate azimuth and elevation 
+                    [azimuth_angle, elevation_angle] = three_d_direction_angles(sat1, sat2);
+                    azimuth_matrix(i, j) = azimuth_angle;
+                    elevation_matrix(i, j) = elevation_angle;
+                end
+            end
+        end
+    end
+    % Update the matrices at time = t
+
+    % Range
+    matrices.range.range_at_time{t} = range_matrix;
+    matrices.range.range_noise{t}= range_matrix - range_matrix';
+    matrices.range.std{t}= std(std(range_matrix - range_matrix'));
+
+    % Azimuth
+    matrices.azimuth.azimuth_at_time{t} = azimuth_matrix;
+    matrices.azimuth.azimuth_noise{t}= azimuth_matrix - azimuth_matrix';
+    matrices.azimuth.std{t}= std(std(azimuth_matrix - azimuth_matrix'));
+
+    % Elevation
+    matrices.elevation.elevation_at_time{t} = elevation_matrix;
+    matrices.elevation.elevation_noise{t}= elevation_matrix - elevation_matrix';
+    matrices.elevation.std{t}= std(std(elevation_matrix - elevation_matrix'));
+   
+
+end
+
+
+%% Plot
+disp("Analysis completed.")
+
+cicle = true;
+recall = true;
+
+while cicle
+
+    if recall
+        disp('Master satellite have the following ID:');
+        disp(id_masters)
+        disp('Please enter one of the following:')
+        disp('- To print the range, azimuth and elevation matrix of one of the satellite enter the ID of the satellite')
+        disp('- To quit the script, press Q')
+
+        recall = false;
+    end
+
+    entry = input("Input: ", 's');
+
+    if entry == "Q" || entry == "q"
+        cicle = false;
+        clc
+    elseif str2double(entry)<n_sat && str2double(entry)>0
+
+        sat_ID = str2double(entry);
+        fprintf('Please enter the desired time (0 < t < %.2d): ', length(tspan));
+        fprintf('\n')
+        t = input('t = ', 's');
+
+        if str2double(t)<length(tspan) && str2double(t)>0
+            t = str2double(t);
+            range_matrix=matrices.range.range_at_time{t};
+            azimuth_matrix=matrices.azimuth.azimuth_at_time{t};
+            elevation_matrix=matrices.elevation.elevation_at_time{t};
+
+            % Plot 
+            plot_matrix(range_matrix, "r", t)
+            plot_matrix(azimuth_matrix, "a", t)
+            plot_matrix(elevation_matrix, "e", t)
+        else
+            disp('Invalid time. ')
+        end
+
+        disp("Enter another ID or quit the script.")
+    else
+        disp("Entry non valid")
+        recall = true;
+    end
+end 
+
+
+
