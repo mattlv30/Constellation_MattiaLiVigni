@@ -43,7 +43,7 @@ matrices = struct();
 %% Initial condition
 
 % Define number of satellite
-n_sat = 40;
+n_sat = 80;
 
 % Define number and type of orbits
 
